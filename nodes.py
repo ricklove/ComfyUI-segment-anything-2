@@ -152,7 +152,7 @@ class Florence2toCoordinates:
             for idx in indexes:
                 if 0 <= idx < len(data[0]):
                     for i in range(len(data)):
-                        bbox = data[i][idx]
+                        bbox = data[i][idx] if i < len(data) else data[0].get("bboxes", [])[idx]
                         min_x, min_y, max_x, max_y = bbox
                         center_x = int((min_x + max_x) / 2)
                         center_y = int((min_y + max_y) / 2)
@@ -161,7 +161,7 @@ class Florence2toCoordinates:
         else:
             for idx in indexes:
                 if 0 <= idx < len(data[0]):
-                    bbox = data[0][idx]
+                    bbox = data[0].get("bboxes", [])[idx] if isinstance(data[0], dict) else data[0][idx]
                     min_x, min_y, max_x, max_y = bbox
                     center_x = int((min_x + max_x) / 2)
                     center_y = int((min_y + max_y) / 2)
