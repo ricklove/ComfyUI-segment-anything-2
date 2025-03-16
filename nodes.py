@@ -528,6 +528,37 @@ class Sam2VideoSegmentationAddPoints:
             }    
         return (sam2_model, inference_state,)
 
+
+def get_color(obj_id):
+    # Golden ratio conjugate for hue distribution
+    golden_ratio_conjugate = (3 - 5 ** 0.5) / 2
+    hue = (obj_id * golden_ratio_conjugate) % 1.0  # [0, 1)
+    
+    # Simple RGB approximation from hue (fixed saturation and value)
+    hue_angle = hue * 6  # Map to 0-6 for RGB segments
+    i = int(hue_angle)
+    f = hue_angle - i  # Fractional part
+    
+    # Full brightness (255), high saturation
+    p = 0    # Minimum value (low due to high saturation)
+    q = int(255 * (1 - f))
+    t = int(255 * f)
+    
+    if i == 0:
+        r, g, b = 255, t, p
+    elif i == 1:
+        r, g, b = q, 255, p
+    elif i == 2:
+        r, g, b = p, 255, t
+    elif i == 3:
+        r, g, b = p, q, 255
+    elif i == 4:
+        r, g, b = t, p, 255
+    else:  # i == 5
+        r, g, b = 255, p, q
+    
+    return (r, g, b)
+
 class Sam2VideoSegmentationAddPointsPerMask:
     @classmethod
     def IS_CHANGED(cls):
@@ -547,8 +578,8 @@ class Sam2VideoSegmentationAddPointsPerMask:
             },
         }
 
-    RETURN_TYPES = ("SAM2MODEL", "SAM2INFERENCESTATE")
-    RETURN_NAMES = ("sam2_model", "inference_state")
+    RETURN_TYPES = ("SAM2MODEL", "SAM2INFERENCESTATE", "IMAGE")
+    RETURN_NAMES = ("sam2_model", "inference_state", "debug_image")
     FUNCTION = "segment"
     CATEGORY = "SAM2"
 
@@ -563,18 +594,28 @@ class Sam2VideoSegmentationAddPointsPerMask:
         num_masks = masks.shape[0]
         print(f"Processing {num_masks} masks")
 
+        # Prepare debug image base
+        H, W = masks.shape[1:]  # Assuming masks is (B, H, W)
+        debug_image = np.zeros((H, W, 3), dtype=np.uint8)
+
         for idx in range(num_masks):
             mask = masks[idx]  # Shape: [H, W]
-            # Convert mask to points (centroid)
             y, x = torch.where(mask > 0.5)  # Get coordinates where mask is active
             if len(y) == 0:  # Skip empty masks
                 print(f"Skipping empty mask at index {idx}")
                 continue
 
-            # Calculate centroid (mean of x and y coordinates)
-            centroid_x = torch.mean(x.float()).item()
-            centroid_y = torch.mean(y.float()).item()
-            coordinates_positive = torch.tensor([[centroid_x, centroid_y]], dtype=torch.float32)
+            # Find representative point
+            coordinates_positive = self.find_representative_point_in_mask(mask)
+            centroid_x, centroid_y = coordinates_positive[0]
+
+            # Mark all mask points in blue
+            debug_image[y.cpu().numpy(), x.cpu().numpy()] = get_color(idx)
+
+            # Mark the selected point in red
+            cx, cy = int(centroid_x), int(centroid_y)
+            # Draw a small cross or square (5x5 pixels)
+            debug_image[max(0, cy-2):min(H, cy+3), max(0, cx-2):min(W, cx+3)] = [255, 0, 0]
 
             object_index = idx + 1  # Unique object_index starting at 1
 
@@ -589,11 +630,49 @@ class Sam2VideoSegmentationAddPointsPerMask:
                     coordinates_negative=None,
                     prev_inference_state=inference_state
                 )
-                print(f"Processed mask {idx + 1}/{num_masks} with object_index {object_index}, centroid: ({centroid_x:.2f}, {centroid_y:.2f})")
+                print(f"Processed mask {idx + 1}/{num_masks} with object_index {object_index}, point: ({centroid_x:.2f}, {centroid_y:.2f})")
             except Exception as e:
                 print(f"Error processing mask {idx}: {str(e)}")
 
-        return (sam2_model, inference_state)
+        # Convert debug image to tensor for ComfyUI (B, H, W, C)
+        debug_tensor = torch.from_numpy(debug_image).float() / 255.0
+        debug_tensor = debug_tensor.unsqueeze(0)  # Add batch dimension: (1, H, W, C)
+
+        return (sam2_model, inference_state, debug_tensor)
+
+    def find_representative_point_in_mask(self, mask):
+        # Get coordinates of all points in the mask
+        y, x = torch.where(mask > 0)  # mask is binary tensor (H, W)
+        
+        if len(x) == 0:  # Empty mask
+            return torch.tensor([[0.0, 0.0]], dtype=torch.float32)
+        
+        # Convert to float for calculations
+        x = x.float()
+        y = y.float()
+        
+        # Calculate median coordinates
+        median_x = torch.median(x)
+        median_y = torch.median(y)
+        
+        # Convert to integers for indexing
+        x_int = median_x.round().long()
+        y_int = median_y.round().long()
+        
+        # Ensure the point is within bounds and in the mask
+        H, W = mask.shape
+        x_int = torch.clamp(x_int, 0, W - 1)
+        y_int = torch.clamp(y_int, 0, H - 1)
+        
+        # If the median point isn't in the mask, find the nearest valid point
+        if mask[y_int, x_int] == 0:
+            coords = torch.stack([x, y], dim=1)  # (N, 2)
+            median_point = torch.tensor([median_x, median_y], device=coords.device)
+            distances = torch.sum((coords - median_point) ** 2, dim=1)
+            nearest_idx = torch.argmin(distances)
+            median_x, median_y = coords[nearest_idx]
+        
+        return torch.tensor([[median_x, median_y]], dtype=torch.float32)
 
 class Sam2VideoSegmentation:
     @classmethod
@@ -635,12 +714,6 @@ class Sam2VideoSegmentation:
             video_segments = {}
             colorized_segments = {}
             
-            def get_color(obj_id):
-                r = (obj_id * 47) % 255
-                g = (obj_id * 71) % 255
-                b = (obj_id * 113) % 255
-                return (r, g, b)
-
             for out_frame_idx, out_obj_ids, out_mask_logits in model.propagate_in_video(inference_state):
                 print("out_mask_logits",out_mask_logits.shape)
                 _, _, H, W = out_mask_logits.shape
