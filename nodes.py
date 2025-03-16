@@ -574,8 +574,8 @@ class Sam2VideoSegmentation:
             },
         }
     
-    RETURN_TYPES = ("MASK", )
-    RETURN_NAMES =("mask", )
+    RETURN_TYPES = ("MASK", "IMAGE")
+    RETURN_NAMES = ("mask", "colorized_video")
     FUNCTION = "segment"
     CATEGORY = "SAM2"
 
@@ -601,15 +601,36 @@ class Sam2VideoSegmentation:
 
             pbar = ProgressBar(B)
             video_segments = {}
+            colorized_segments = {}
+            
+            def get_color(obj_id):
+                r = (obj_id * 47) % 255
+                g = (obj_id * 71) % 255
+                b = (obj_id * 113) % 255
+                return (r, g, b)
+
             for out_frame_idx, out_obj_ids, out_mask_logits in model.propagate_in_video(inference_state):
                 print("out_mask_logits",out_mask_logits.shape)
                 _, _, H, W = out_mask_logits.shape
                 # Combine masks for all object IDs in the frame
                 combined_mask = np.zeros((H, W), dtype=np.uint8) 
+                colorized_frame = np.zeros((H, W, 3), dtype=np.uint8)
+                
                 for i, out_obj_id in enumerate(out_obj_ids):
                     out_mask = (out_mask_logits[i] > 0.0).cpu().numpy()
                     combined_mask = np.logical_or(combined_mask, out_mask)
+                    
+                    mask_np = out_mask[0].astype(np.uint8)
+                    r, g, b = get_color(out_obj_id)
+                    for channel, value in enumerate([r, g, b]):
+                        colorized_frame[:, :, channel] = np.where(
+                            mask_np > 0, 
+                            value, 
+                            colorized_frame[:, :, channel]
+                        )
+                
                 video_segments[out_frame_idx] = combined_mask
+                colorized_segments[out_frame_idx] = colorized_frame
                 pbar.update(1)
 
             mask_list = []
@@ -617,6 +638,10 @@ class Sam2VideoSegmentation:
             for frame_idx, combined_mask in video_segments.items():
                 mask_list.append(combined_mask)
             print(f"Total masks collected: {len(mask_list)}")
+
+            colorized_list = []
+            for frame_idx, colorized_frame in colorized_segments.items():
+                colorized_list.append(colorized_frame)
 
         if not keep_model_loaded:
             model.to(offload_device)
@@ -628,8 +653,12 @@ class Sam2VideoSegmentation:
             mask_tensor = mask_tensor[:, :, 0]
             out_list.append(mask_tensor)
         mask_tensor = torch.stack(out_list, dim=0).cpu().float()
-        return (mask_tensor,)
-        
+
+        colorized_tensor = torch.from_numpy(np.stack(colorized_list, axis=0))  # B, H, W, 3
+        colorized_tensor = colorized_tensor.cpu().float() / 255.0
+
+        return (mask_tensor, colorized_tensor)
+    
 class Sam2AutoSegmentation:
     @classmethod
     def INPUT_TYPES(s):
