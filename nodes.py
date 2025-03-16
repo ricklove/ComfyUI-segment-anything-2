@@ -496,6 +496,73 @@ class Sam2VideoSegmentationAddPoints:
             }    
         return (sam2_model, inference_state,)
 
+class Sam2VideoSegmentationAddPointsPerMask:
+    @classmethod
+    def IS_CHANGED(cls):
+        return ""  # Simple reset trigger
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "sam2_model": ("SAM2MODEL",),
+                "frame_index": ("INT", {"default": 0}),
+                "masks": ("MASK",),
+            },
+            "optional": {
+                "image": ("IMAGE", ),
+                "prev_inference_state": ("SAM2INFERENCESTATE",),
+            },
+        }
+
+    RETURN_TYPES = ("SAM2MODEL", "SAM2INFERENCESTATE")
+    RETURN_NAMES = ("sam2_model", "inference_state")
+    FUNCTION = "segment"
+    CATEGORY = "SAM2"
+
+    def segment(self, sam2_model, frame_index, masks, image=None, prev_inference_state=None):
+        # Initialize the SAM2 segmentation helper
+        sam2_helper = Sam2VideoSegmentationAddPoints()
+
+        # If no previous inference state, start fresh
+        inference_state = prev_inference_state if prev_inference_state is not None else None
+
+        # Process each mask with a unique object_index
+        num_masks = masks.shape[0]
+        print(f"Processing {num_masks} masks")
+
+        for idx in range(num_masks):
+            mask = masks[idx]  # Shape: [H, W]
+            # Convert mask to points (centroid)
+            y, x = torch.where(mask > 0.5)  # Get coordinates where mask is active
+            if len(y) == 0:  # Skip empty masks
+                print(f"Skipping empty mask at index {idx}")
+                continue
+
+            # Calculate centroid (mean of x and y coordinates)
+            centroid_x = torch.mean(x.float()).item()
+            centroid_y = torch.mean(y.float()).item()
+            coordinates_positive = torch.tensor([[centroid_x, centroid_y]], dtype=torch.float32)
+
+            object_index = idx + 1  # Unique object_index starting at 1
+
+            # Call the SAM2 segment method
+            try:
+                sam2_model, inference_state = sam2_helper.segment(
+                    sam2_model=sam2_model,
+                    coordinates_positive=coordinates_positive,
+                    frame_index=frame_index,
+                    object_index=object_index,
+                    image=image,
+                    coordinates_negative=None,
+                    prev_inference_state=inference_state
+                )
+                print(f"Processed mask {idx + 1}/{num_masks} with object_index {object_index}, centroid: ({centroid_x:.2f}, {centroid_y:.2f})")
+            except Exception as e:
+                print(f"Error processing mask {idx}: {str(e)}")
+
+        return (sam2_model, inference_state)
+
 class Sam2VideoSegmentation:
     @classmethod
     def INPUT_TYPES(s):
@@ -680,6 +747,7 @@ NODE_CLASS_MAPPINGS = {
     "Florence2toCoordinates": Florence2toCoordinates,
     "Sam2AutoSegmentation": Sam2AutoSegmentation,
     "Sam2VideoSegmentationAddPoints": Sam2VideoSegmentationAddPoints,
+    "Sam2VideoSegmentationAddPointsPerMask": Sam2VideoSegmentationAddPointsPerMask,
     "Sam2VideoSegmentation": Sam2VideoSegmentation
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -688,5 +756,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Florence2toCoordinates": "Florence2 Coordinates",
     "Sam2AutoSegmentation": "Sam2AutoSegmentation",
     "Sam2VideoSegmentationAddPoints": "Sam2VideoSegmentationAddPoints",
+    "Sam2VideoSegmentationAddPointsPerMask": "Sam2VideoSegmentationAddPointsPerMask",
     "Sam2VideoSegmentation": "Sam2VideoSegmentation"
 }
